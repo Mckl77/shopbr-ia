@@ -1,0 +1,34 @@
+# ====================================================================
+# .gitignore : fichiers que git ne doit JAMAIS versionner
+# ====================================================================
+# Pourquoi ? Trois raisons :
+# 1. SECRETS : un mot de passe pousse sur GitHub est compromis a vie
+#    (meme supprime ensuite, il reste dans l'historique git).
+# 2. FICHIERS GENERES : caches Python, resultats de tests... se
+#    regenerent tout seuls, inutile de les partager.
+# 3. GROS FICHIERS : donnees et modeles n'ont pas leur place dans git
+#    (fait pour du code) - ils vivent dans S3 / MLflow.
+
+# ── Secrets - ne JAMAIS committer ──
+.env            # le vrai fichier de config (seul .env.example, sans secrets, est versionne)
+*.pem
+*.key
+
+# ── Python (fichiers generes automatiquement) ──
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+venv/
+.venv/
+
+# ── Donnees et modeles (trop volumineux pour git) ──
+*.csv
+*.parquet
+mlruns/         # dossier local de MLflow
+*.pkl
+
+# ── Fichiers d'editeur / systeme ──
+.vscode/
+.idea/
+.DS_Store

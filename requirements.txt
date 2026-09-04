@@ -1,0 +1,40 @@
+# ============================================================
+# Projet #7 - ShopBR - Dependances Python
+# ============================================================
+
+# Machine Learning
+xgboost==2.0.3
+scikit-learn==1.4.2
+lightgbm==4.3.0
+numpy==1.26.4
+pandas==2.2.2
+
+# MLflow
+mlflow==2.13.0
+
+# Evidently AI
+evidently==0.4.30
+
+# Ray
+ray[train]==2.20.0
+ray[rllib]==2.20.0
+gymnasium==0.29.1
+
+# API
+flask==3.0.3
+flask-cors==4.0.1
+gunicorn==22.0.0
+
+# Dashboard
+dash==2.17.1
+dash-bootstrap-components==1.6.0
+plotly==5.22.0
+
+# AWS
+boto3==1.34.100
+psycopg2-binary==2.9.9
+
+# Utilitaires
+python-dotenv==1.0.1
+requests==2.32.2
+pyyaml==6.0.1

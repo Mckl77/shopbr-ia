@@ -1,0 +1,210 @@
+# ====================================================================
+# Projet #7 - ShopBR - Docker Compose
+# ====================================================================
+#
+# QU'EST-CE QUE DOCKER COMPOSE ?
+# Notre application n'est pas UN seul programme, mais PLUSIEURS qui
+# doivent fonctionner ensemble : l'API qui fait les predictions, le
+# dashboard que regarde l'equipe logistique, le serveur MLflow qui
+# garde la trace des modeles, Airflow qui orchestre les taches
+# automatiques, et une base de donnees PostgreSQL pour stocker les
+# informations techniques d'Airflow et de MLflow.
+#
+# Docker Compose permet de decrire TOUS ces services dans un seul
+# fichier, et de les demarrer tous ensemble avec une seule commande :
+#     docker-compose up -d
+# au lieu de devoir lancer 5 commandes "docker run" separees en
+# configurant manuellement comment ils communiquent entre eux.
+#
+# Chaque bloc sous "services:" represente UN conteneur Docker, avec sa
+# propre configuration.
+# ====================================================================
+
+version: "3.9"  # version du format de fichier docker-compose utilisee
+
+# ── RESEAU ────────────────────────────────────────────────────────
+# Un "network" Docker permet a tous nos conteneurs de communiquer
+# entre eux par leur NOM (par exemple l'API peut joindre MLflow juste
+# en utilisant l'adresse "http://mlflow:5000", sans avoir besoin de
+# connaitre une adresse IP precise). C'est Docker qui gere cette
+# resolution de nom automatiquement, comme un petit DNS interne.
+networks:
+  shopbr-net:
+    driver: bridge
+
+# ── VOLUMES ───────────────────────────────────────────────────────
+# Un "volume" est un espace de stockage qui SURVIT au redemarrage ou
+# a la suppression d'un conteneur. Sans volume, toutes les donnees
+# ecrites a l'interieur d'un conteneur disparaitraient des qu'on
+# l'arrete. Ici, on veut absolument garder les donnees de PostgreSQL
+# (les commandes en cours d'analyse) et les logs Airflow meme si on
+# redemarre les conteneurs.
+volumes:
+  postgres-data:
+  airflow-logs:
+
+services:
+
+  # ── SERVICE 1 : POSTGRESQL ─────────────────────────────────────
+  # Base de donnees relationnelle classique, utilisee ici comme
+  # "backend" technique pour Airflow (stockage des executions de
+  # taches) et pour MLflow (stockage des metadonnees des modeles).
+  # Ce n'est PAS la base de donnees metier de ShopBR : c'est une base
+  # technique interne a notre infrastructure de MLOps.
+  postgres:
+    image: postgres:15-alpine  # on utilise l'image officielle PostgreSQL, version allegee "alpine"
+    container_name: shopbr-postgres
+    environment:
+      # ${VARIABLE:-valeur_par_defaut} : Docker Compose lit la valeur
+      # dans le fichier .env si elle existe, sinon utilise la valeur
+      # par defaut indiquee. Cela permet de ne jamais ecrire de mot de
+      # passe en clair dans ce fichier (qui peut etre partage ou
+      # versionne), tout en gardant un comportement par defaut pour
+      # les tests locaux rapides.
+      POSTGRES_USER: ${POSTGRES_USER:-shopbr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shopbr123}
+      POSTGRES_DB: ${POSTGRES_DB:-shopbr}
+    volumes:
+      # On relie le volume "postgres-data" (defini plus haut) au
+      # dossier interne ou PostgreSQL stocke physiquement ses donnees.
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - shopbr-net
+    # healthcheck : meme principe que dans le Dockerfile, mais defini
+    # ici au niveau du service. pg_isready est un outil fourni par
+    # PostgreSQL pour verifier rapidement que la base accepte les connexions.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shopbr"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped  # redemarre automatiquement le conteneur s'il plante, sauf si on l'arrete volontairement
+
+  # ── SERVICE 2 : MLFLOW TRACKING SERVER ─────────────────────────
+  # Le serveur central qui garde la trace de tous les entrainements
+  # de modeles (metriques, parametres, versions) et permet de
+  # promouvoir une version en "Production".
+  mlflow:
+    image: python:3.11-slim
+    container_name: shopbr-mlflow
+    # "command" remplace la commande par defaut de l'image. Ici, on
+    # installe MLflow a la volee puis on demarre son serveur, en lui
+    # disant ou stocker ses metadonnees (dans la base PostgreSQL
+    # definie ci-dessus) et ou stocker les fichiers des modeles
+    # eux-memes (dans un bucket S3).
+    command: >
+      bash -c "pip install mlflow psycopg2-binary boto3 -q &&
+               mlflow server
+               --host 0.0.0.0
+               --port 5000
+               --backend-store-uri postgresql://shopbr:shopbr123@postgres/shopbr
+               --default-artifact-root s3://votre-bucket/mlflow-artifacts"
+    ports:
+      # "host:conteneur" -> le port 5000 du conteneur est rendu
+      # accessible sur le port 5000 de notre machine. C'est ce qui
+      # permet d'ouvrir http://localhost:5000 dans un navigateur pour
+      # voir l'interface web de MLflow.
+      - "5000:5000"
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-sa-east-1}
+    depends_on:
+      # "depends_on" avec une condition garantit que MLflow ne demarre
+      # qu'une fois PostgreSQL reellement pret (pas juste demarre,
+      # mais confirme "healthy" par son healthcheck). Sans cela,
+      # MLflow pourrait essayer de se connecter a une base pas encore
+      # prete et planter au demarrage.
+      postgres:
+        condition: service_healthy
+    networks:
+      - shopbr-net
+    restart: unless-stopped
+
+  # ── SERVICE 3 : API FLASK ───────────────────────────────────────
+  # Notre API de prediction (cf src/api/api.py)
+  api:
+    build:
+      # Plutot que d'utiliser une image toute faite, on construit
+      # notre propre image a partir du Dockerfile qu'on a ecrit.
+      # "context: ." indique le dossier de depart pour trouver les
+      # fichiers a copier (la racine du depot).
+      context: .
+      dockerfile: Dockerfile
+    container_name: shopbr-api
+    command: python src/api/api.py
+    ports:
+      - "8000:8000"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MODEL_NAME: shopbr_delay_risk
+      MODEL_STAGE: Production
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      REDSHIFT_HOST: ${REDSHIFT_HOST}
+      REDSHIFT_PASSWORD: ${REDSHIFT_PASSWORD}
+    depends_on:
+      - mlflow  # l'API a besoin que MLflow soit demarre pour pouvoir charger le modele
+    networks:
+      - shopbr-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ── SERVICE 4 : DASHBOARD DASH ──────────────────────────────────
+  # L'interface visuelle consultee par l'equipe logistique
+  # (cf src/dashboard/app.py)
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: shopbr-dashboard
+    command: python src/dashboard/app.py
+    ports:
+      - "8050:8050"
+    environment:
+      # Le dashboard appelle l'API via son nom de service Docker
+      # ("api"), pas via "localhost" : a l'interieur du reseau Docker,
+      # chaque conteneur est joignable par le nom qu'on lui a donne
+      # dans ce fichier.
+      API_URL: http://api:8000
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    depends_on:
+      - api
+    networks:
+      - shopbr-net
+    restart: unless-stopped
+
+  # ── SERVICE 5 : APACHE AIRFLOW ──────────────────────────────────
+  # L'orchestrateur qui declenche automatiquement, chaque mois, le
+  # pipeline complet (extraction, nettoyage, entrainement, deploiement)
+  airflow:
+    image: apache/airflow:2.9.1  # image officielle Airflow
+    container_name: shopbr-airflow
+    command: standalone  # mode "standalone" : configuration simplifiee pour les tests/demos, regroupant tous les composants Airflow en un seul conteneur
+    ports:
+      - "8080:8080"  # interface web Airflow, accessible sur http://localhost:8080
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor  # execute les taches localement (suffisant pour ce volume de donnees)
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://shopbr:shopbr123@postgres/shopbr
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-shopbr-secret}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      # On "monte" notre fichier de definition du pipeline
+      # (airflow_dag.py) directement dans le dossier ou Airflow va
+      # chercher ses taches a planifier. Toute modification de ce
+      # fichier sur notre machine sera immediatement visible par Airflow.
+      - ./dags/airflow_dag.py:/opt/airflow/dags/shopbr_dag.py
+      - airflow-logs:/opt/airflow/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - shopbr-net
+    restart: unless-stopped
