@@ -1,0 +1,78 @@
+{
+  "comment": "Configuration Airbyte - Connexion source ShopBR vers AWS S3",
+  "comment2": "A importer dans Airbyte ou via l'API /api/v1/connections",
+
+  "connection": {
+    "name": "shopbr-to-s3",
+    "sourceId": "shopbr-source",
+    "destinationId": "s3-bronze-destination",
+    "syncCatalog": {
+      "streams": [
+        {
+          "stream": {
+            "name": "orders",
+            "jsonSchema": {
+              "type": "object",
+              "properties": {
+                "order_id":                     { "type": "string" },
+                "customer_id":                   { "type": "string" },
+                "order_status":                  { "type": "string" },
+                "order_purchase_timestamp":      { "type": "string", "format": "date-time" },
+                "order_delivered_customer_date": { "type": "string", "format": "date-time" },
+                "order_estimated_delivery_date": { "type": "string", "format": "date-time" }
+              }
+            }
+          },
+          "config": {
+            "syncMode": "incremental_append",
+            "destinationSyncMode": "append",
+            "cursorField": ["order_purchase_timestamp"]
+          }
+        },
+        {
+          "stream": { "name": "order_items" },
+          "config": { "syncMode": "full_refresh", "destinationSyncMode": "overwrite" }
+        },
+        {
+          "stream": { "name": "order_payments" },
+          "config": { "syncMode": "full_refresh", "destinationSyncMode": "overwrite" }
+        },
+        {
+          "stream": { "name": "order_reviews" },
+          "config": { "syncMode": "full_refresh", "destinationSyncMode": "overwrite" }
+        }
+      ]
+    },
+    "scheduleType": "cron",
+    "scheduleData": {
+      "cron": { "cronExpression": "0 2 1 * *", "cronTimeZone": "UTC" }
+    },
+    "status": "active"
+  },
+
+  "source": {
+    "name": "ShopBR Operational Database",
+    "sourceDefinitionId": "postgres-source",
+    "connectionConfiguration": {
+      "host": "shopbr-prod-db.xxxx.sa-east-1.rds.amazonaws.com",
+      "port": 5432,
+      "database": "shopbr_operational",
+      "schema": "public",
+      "username": "airbyte_reader"
+    }
+  },
+
+  "destination": {
+    "name": "AWS S3 Bronze Layer",
+    "destinationDefinitionId": "s3",
+    "connectionConfiguration": {
+      "s3_bucket_name": "votre-bucket-shopbr",
+      "s3_bucket_path": "bronze",
+      "s3_bucket_region": "sa-east-1",
+      "format": {
+        "format_type": "CSV",
+        "compression_codec": "GZIP"
+      }
+    }
+  }
+}
