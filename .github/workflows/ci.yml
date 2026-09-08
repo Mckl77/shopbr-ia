@@ -8,17 +8,20 @@
 # du code est pousse (push) ou qu'une Pull Request est ouverte.
 #
 # ROLE DE CE WORKFLOW (la partie "CI" de CI/CD) :
-# 1. lint  : verifier la qualite/syntaxe du code (ruff)
+# 1. lint  : verifier la qualite/syntaxe du code applicatif (ruff)
 # 2. tests : executer les tests unitaires (pytest)
-# 3. build : verifier que l'image Docker se construit sans erreur
-# 4. si tout est vert ET qu'on est sur la branche main : notifier le
-#    depot shopbr-deploy pour qu'il lance le DEPLOIEMENT (la partie "CD")
+# 3. si tout est vert ET qu'on est sur la branche main : notifier le
+#    depot shopbr-deploy pour qu'il lance le DEPLOIEMENT (partie "CD")
 #
-# Ainsi, aucun code casse ne peut partir en production : le deploiement
-# n'est declenche que si lint + tests + build ont reussi.
+# POURQUOI PAS DE BUILD DOCKER ICI ?
+# La construction de l'image est le role du depot shopbr-deploy, qui
+# la construit ET la publie sur Amazon ECR. La refaire ici serait un
+# doublon coûteux (l'image embarque Ray, MLflow, Evidently : plusieurs
+# minutes de telechargement). Separation des responsabilites : la CI
+# valide le CODE, le CD construit et deploie l'IMAGE.
 # ====================================================================
 
-name: CI - Lint, tests et build
+name: CI - Lint et tests
 
 on:
   push:
@@ -32,23 +35,29 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Installer ruff
         run: pip install ruff
       - name: Lint (erreurs de syntaxe et imports casses uniquement)
-        # E9/F63/F7/F82 = erreurs graves (syntaxe, comparaisons impossibles,
-        # variables non definies). On ne bloque pas sur le style.
+        # On verifie le code applicatif (API + tests). Les scripts
+        # PySpark ne sont pas analyses ici : ils utilisent des
+        # variables fournies par l'environnement d'execution
+        # (spark, dbutils), que l'outil signalerait a tort comme
+        # non definies.
+        # E9/F63/F7/F82 = erreurs graves (syntaxe, comparaisons
+        # impossibles, variables non definies). On ne bloque pas
+        # sur le style.
         run: ruff check src/api/ tests/ --select E9,F63,F7,F82
 
   # ── JOB 2 : TESTS UNITAIRES ─────────────────────────────────────
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Installer les dependances de test
@@ -58,30 +67,20 @@ jobs:
       - name: Executer les tests
         run: python -m pytest tests/ -v
 
-  # ── JOB 3 : BUILD DOCKER (verification) ─────────────────────────
-  docker-build:
-    runs-on: ubuntu-latest
-    needs: [lint, tests]   # ne se lance que si lint ET tests sont verts
-    steps:
-      - uses: actions/checkout@v4
-      - name: Construire l'image (sans la publier)
-        run: docker build -t shopbr-api:ci-check .
-
-  # ── JOB 4 : DECLENCHER LE DEPLOIEMENT (CD) ──────────────────────
+  # ── JOB 3 : DECLENCHER LE DEPLOIEMENT (CD) ──────────────────────
   # Envoie un evenement "repository_dispatch" au depot shopbr-deploy,
-  # qui contient le pipeline de deploiement (build+push ECR, kubectl).
+  # qui contient le pipeline de deploiement (build + push ECR, kubectl).
   # Necessite un secret DEPLOY_REPO_TOKEN : un Personal Access Token
   # (fine-grained, permission "Contents: read-write" sur shopbr-deploy).
   trigger-deploy:
     runs-on: ubuntu-latest
-    needs: [docker-build]
+    needs: [lint, tests]   # ne se lance que si lint ET tests sont verts
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - name: Notifier le depot de deploiement
         env:
           GH_TOKEN: ${{ secrets.DEPLOY_REPO_TOKEN }}
-          # Remplacer VOTRE_COMPTE par votre nom d'utilisateur GitHub
-          DEPLOY_REPO: VOTRE_COMPTE/shopbr-deploy
+          DEPLOY_REPO: Mckl77/shopbr-deploy
         run: |
           curl -sS -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
