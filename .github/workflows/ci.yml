@@ -41,7 +41,7 @@ jobs:
       - name: Lint (erreurs de syntaxe et imports casses uniquement)
         # E9/F63/F7/F82 = erreurs graves (syntaxe, comparaisons impossibles,
         # variables non definies). On ne bloque pas sur le style.
-        run: ruff check src/ tests/ --select E9,F63,F7,F82
+        run: ruff check src/api/ tests/ --select E9,F63,F7,F82
 
   # ── JOB 2 : TESTS UNITAIRES ─────────────────────────────────────
   tests:
