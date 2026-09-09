@@ -97,4 +97,7 @@ Secret à configurer dans **ce** dépôt : `DEPLOY_REPO_TOKEN`
 | C2.4 | `sql/` (DISTKEY/SORTKEY), couches Bronze/Silver/Gold |
 | C2.7 | `src/monitoring/`, healthchecks, logs structurés |
 | C4.3 | `src/api/api.py` (API REST intégrée à l'infra) |
+<!-- test de la chaine CI/CD -->
 | C4.5 | `dags/airflow_dag.py` + `src/training/mlflow_train.py` |
+
+
