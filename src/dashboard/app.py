@@ -91,6 +91,34 @@ def risk_badge(risk_pct):
         return dbc.Badge("Risque faible", color="success")
 
 
+# ── Graphiques (definis AVANT le layout qui les utilise) ──────
+
+def build_state_chart():
+    df = pd.DataFrame(REAL_STATE_DATA)
+    fig = px.bar(df, x="state", y="rate", color="rate",
+                 hover_data=["name", "orders"],
+                 labels={"state": "État", "rate": "Taux de retard (%)"},
+                 color_continuous_scale=["#02C39A", "#F4A261", "#E76F51"])
+    fig.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                      coloraxis_showscale=False, margin=dict(t=20, b=20))
+    return fig
+
+
+def build_metrics_chart():
+    versions = ["v1", "v2", "v3"]
+    precision = [68.2, 74.5, 78.3]
+    recall    = [55.1, 64.8, 71.2]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=versions, y=precision, mode="lines+markers",
+                             name="Précision (%)", line=dict(color=COLORS["accent"])))
+    fig.add_trace(go.Scatter(x=versions, y=recall, mode="lines+markers",
+                             name="Rappel (%)", line=dict(color=COLORS["orange"])))
+    fig.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                      margin=dict(t=20, b=20), legend=dict(orientation="h", y=-0.2))
+    return fig
+
+
+
 # ── Layout ───────────────────────────────────────────────────
 app.layout = dbc.Container([
 
@@ -209,31 +237,6 @@ app.layout = dbc.Container([
     dcc.Store(id="orders-store"),
 
 ], fluid=True, style={"background": COLORS["light"], "min-height": "100vh"})
-
-
-def build_state_chart():
-    df = pd.DataFrame(REAL_STATE_DATA)
-    fig = px.bar(df, x="state", y="rate", color="rate",
-                 hover_data=["name", "orders"],
-                 labels={"state": "État", "rate": "Taux de retard (%)"},
-                 color_continuous_scale=["#02C39A", "#F4A261", "#E76F51"])
-    fig.update_layout(plot_bgcolor="white", paper_bgcolor="white",
-                      coloraxis_showscale=False, margin=dict(t=20, b=20))
-    return fig
-
-
-def build_metrics_chart():
-    versions = ["v1", "v2", "v3"]
-    precision = [68.2, 74.5, 78.3]
-    recall    = [55.1, 64.8, 71.2]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=versions, y=precision, mode="lines+markers",
-                             name="Précision (%)", line=dict(color=COLORS["accent"])))
-    fig.add_trace(go.Scatter(x=versions, y=recall, mode="lines+markers",
-                             name="Rappel (%)", line=dict(color=COLORS["orange"])))
-    fig.update_layout(plot_bgcolor="white", paper_bgcolor="white",
-                      margin=dict(t=20, b=20), legend=dict(orientation="h", y=-0.2))
-    return fig
 
 
 @callback(
