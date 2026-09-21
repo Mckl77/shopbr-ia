@@ -82,6 +82,80 @@ def generate_mock_orders():
     return sorted(orders, key=lambda x: -x["risk_pct"])
 
 
+
+# ── Commandes reelles Olist ─────────────────────────────────────────
+# Le dashboard affiche les commandes les plus recentes du dataset,
+# scorees par le modele via l'API. Le chargement des CSV (plusieurs
+# dizaines de Mo) ne se fait qu'UNE fois, au premier affichage : les
+# commandes preparees sont ensuite gardees en memoire.
+DATA_DIR = os.getenv("DATA_DIR", "data")
+_REAL_ORDERS_CACHE = None
+
+
+def load_real_orders(n=40):
+    """
+    Construit les n commandes les plus recentes au format attendu par
+    l'API (memes variables, calculees exactement comme a l'entrainement
+    dans train_local.py), plus deux champs d'affichage : l'Etat du
+    client et le montant.
+    """
+    global _REAL_ORDERS_CACHE
+    if _REAL_ORDERS_CACHE is not None:
+        return _REAL_ORDERS_CACHE
+
+    orders = pd.read_csv(f"{DATA_DIR}/olist_orders_dataset.csv",
+                         parse_dates=["order_purchase_timestamp"])
+    items = pd.read_csv(f"{DATA_DIR}/olist_order_items_dataset.csv")
+    products = pd.read_csv(f"{DATA_DIR}/olist_products_dataset.csv",
+                           usecols=["product_id", "product_weight_g"])
+    sellers = pd.read_csv(f"{DATA_DIR}/olist_sellers_dataset.csv",
+                          usecols=["seller_id", "seller_state"])
+    customers = pd.read_csv(f"{DATA_DIR}/olist_customers_dataset.csv",
+                            usecols=["customer_id", "customer_state"])
+    payments = pd.read_csv(f"{DATA_DIR}/olist_order_payments_dataset.csv",
+                           usecols=["order_id", "payment_installments"])
+
+    # On ne garde que les n commandes les plus recentes : c'est la
+    # "file du jour" que l'equipe logistique consulterait.
+    recent = orders.sort_values("order_purchase_timestamp", ascending=False)
+    recent = recent[recent["order_id"].isin(items["order_id"])].head(n)
+
+    it = items[items["order_id"].isin(recent["order_id"])].merge(products, on="product_id", how="left")
+    agg = it.groupby("order_id").agg(
+        nb_items=("order_item_id", "count"),
+        nb_sellers=("seller_id", "nunique"),
+        total_price=("price", "sum"),
+        total_freight=("freight_value", "sum"),
+        weight_g=("product_weight_g", "sum"),
+        main_seller=("seller_id", "first"),
+    ).reset_index()
+    pay = payments.groupby("order_id")["payment_installments"].max().reset_index()
+
+    df = (recent.merge(agg, on="order_id")
+                .merge(pay, on="order_id", how="left")
+                .merge(customers, on="customer_id", how="left")
+                .merge(sellers, left_on="main_seller", right_on="seller_id", how="left"))
+
+    payload = []
+    for _, r in df.iterrows():
+        payload.append({
+            "order_id": r["order_id"][:10],   # identifiant raccourci, plus lisible
+            "nb_items": int(r["nb_items"]),
+            "nb_sellers": int(r["nb_sellers"]),
+            "total_price": round(float(r["total_price"]), 2),
+            "total_freight": round(float(r["total_freight"]), 2),
+            "cross_state_delivery": bool(r["customer_state"] != r["seller_state"]),
+            "purchase_weekday": int(r["order_purchase_timestamp"].weekday()),
+            "purchase_hour": int(r["order_purchase_timestamp"].hour),
+            "estimated_weight_kg": round(float(r["weight_g"] or 0) / 1000, 2) if pd.notna(r["weight_g"]) else 0.0,
+            "max_installments": int(r["payment_installments"]) if pd.notna(r["payment_installments"]) else 1,
+            "state": r["customer_state"],
+        })
+
+    _REAL_ORDERS_CACHE = payload
+    return payload
+
+
 def risk_badge(risk_pct):
     if risk_pct >= 20:
         return dbc.Badge("Risque elevé", color="danger")
@@ -244,13 +318,38 @@ app.layout = dbc.Container([
     Input("refresh-interval", "n_intervals")
 )
 def refresh_orders(n):
+    """
+    Envoie les commandes reelles a l'API (POST /predict/batch) et
+    recupere un score de risque pour chacune.
+
+    Correctif : l'ancienne version appelait cette adresse en GET, que
+    l'API refuse (elle n'accepte que POST). Le dashboard retombait donc
+    TOUJOURS sur ses donnees de demonstration, meme avec un modele charge.
+    """
     try:
-        resp = requests.get(f"{API_URL}/predict/batch", timeout=5)
+        orders = load_real_orders()
+        resp = requests.post(f"{API_URL}/predict/batch",
+                             json={"orders": orders}, timeout=30)
         if resp.status_code == 200:
-            return resp.json()
-    except Exception:
-        pass
-    return {"results": generate_mock_orders()}
+            body = resp.json()
+            # L'API renvoie les scores ; on y rattache l'Etat et le
+            # montant de chaque commande pour l'affichage.
+            infos = {o["order_id"]: o for o in orders}
+            results = []
+            for r in body.get("results", []):
+                o = infos.get(r["order_id"], {})
+                results.append({
+                    "order_id": r["order_id"],
+                    "state": o.get("state", "—"),
+                    "total_price": o.get("total_price", 0),
+                    "risk_pct": r["risk_pct"],
+                })
+            results.sort(key=lambda x: -x["risk_pct"])
+            return {"results": results, "source": "api",
+                    "model_version": body.get("model_version")}
+    except Exception as e:
+        print(f"Dashboard : API indisponible, bascule sur la demo ({e})")
+    return {"results": generate_mock_orders(), "source": "demo"}
 
 
 @callback(
@@ -285,7 +384,20 @@ def update_orders_table(data):
         html.Tbody(rows)
     ], striped=True, hover=True, responsive=True, size="sm")
 
-    return table, high, medium, low
+    # Bandeau de transparence : on affiche toujours d'ou viennent les
+    # scores, pour ne jamais confondre donnees de demo et predictions.
+    if data and data.get("source") == "api":
+        banner = dbc.Alert(
+            f"Scores calculés par le modèle ({data.get('model_version')}) "
+            f"sur les {len(orders)} commandes les plus récentes du dataset.",
+            color="success", className="py-2 small")
+    else:
+        banner = dbc.Alert(
+            "API indisponible : données de démonstration simulées, "
+            "ce ne sont pas des prédictions du modèle.",
+            color="warning", className="py-2 small")
+
+    return html.Div([banner, table]), high, medium, low
 
 
 if __name__ == "__main__":
