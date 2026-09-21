@@ -1,0 +1,188 @@
+"""
+====================================================================
+ShopBR - Entrainement local du modele de risque de retard
+====================================================================
+
+A QUOI SERT CE SCRIPT ?
+Il entraine le modele qui predit le risque de retard, a partir des
+fichiers CSV Olist poses dans le dossier data/, puis il l'enregistre
+dans le dossier models/. Une fois l'API redemarree, elle charge ce
+modele et peut repondre aux predictions.
+
+POURQUOI UNE VERSION SEPAREE DE src/training/mlflow_train.py ?
+Le script du depot lit les donnees depuis Redshift / S3, c'est-a-dire
+l'architecture cible en production. Ici, on travaille en local a
+partir des CSV : meme logique, meme modele, meme enregistrement
+modele, mais la source des donnees et le mode d'enregistrement
+changent. C'est exactement ce que fait une equipe qui veut rejouer un
+entrainement sur son poste.
+
+COMMENT L'UTILISER ?
+  1. Poser les 9 CSV Olist dans le dossier data/
+  2. docker compose exec api pip install -q xgboost scikit-learn
+  3. docker compose exec api python train_local.py
+  4. docker compose restart api
+====================================================================
+"""
+
+import json
+import os
+import warnings
+from datetime import datetime
+
+import pandas as pd
+from sklearn.metrics import precision_score, recall_score, roc_auc_score
+from sklearn.model_selection import train_test_split
+from xgboost import XGBClassifier
+
+warnings.filterwarnings("ignore")
+
+# ── Parametres ──────────────────────────────────────────────────────
+DATA_DIR = os.environ.get("DATA_DIR", "data")
+MODEL_DIR = os.environ.get("MODEL_DIR", "models")
+
+# Colonnes attendues par l'API, dans l'ordre exact de l'entrainement.
+# Regle d'or : les memes colonnes, dans le meme ordre, sinon le modele
+# interprete une variable pour une autre sans lever d'erreur.
+FEATURE_COLUMNS = [
+    "nb_items", "nb_sellers", "total_price", "total_freight",
+    "cross_state_delivery", "purchase_weekday", "purchase_hour",
+    "estimated_weight_kg", "max_installments",
+]
+
+
+def load_and_build_features() -> pd.DataFrame:
+    """Lit les CSV et construit une ligne par commande livree."""
+    print("Lecture des fichiers CSV...")
+    orders = pd.read_csv(
+        f"{DATA_DIR}/olist_orders_dataset.csv",
+        parse_dates=["order_purchase_timestamp",
+                     "order_delivered_customer_date",
+                     "order_estimated_delivery_date"])
+    items = pd.read_csv(f"{DATA_DIR}/olist_order_items_dataset.csv")
+    products = pd.read_csv(f"{DATA_DIR}/olist_products_dataset.csv")
+    sellers = pd.read_csv(f"{DATA_DIR}/olist_sellers_dataset.csv")
+    customers = pd.read_csv(f"{DATA_DIR}/olist_customers_dataset.csv")
+    payments = pd.read_csv(f"{DATA_DIR}/olist_order_payments_dataset.csv")
+
+    # ── Agregation au niveau commande ───────────────────────────────
+    # Une commande peut contenir plusieurs articles : on les regroupe
+    # pour obtenir une seule ligne par commande.
+    print("Agregation des articles par commande...")
+    items_prod = items.merge(
+        products[["product_id", "product_weight_g"]], on="product_id", how="left")
+    agg = items_prod.groupby("order_id").agg(
+        nb_items=("order_item_id", "count"),
+        nb_sellers=("seller_id", "nunique"),
+        total_price=("price", "sum"),
+        total_freight=("freight_value", "sum"),
+        weight_g=("product_weight_g", "sum"),
+        main_seller=("seller_id", "first"),
+    ).reset_index()
+    agg["estimated_weight_kg"] = (agg["weight_g"].fillna(0) / 1000).round(2)
+
+    # Nombre maximal d'echeances de paiement (indicateur de panier)
+    pay = payments.groupby("order_id")["payment_installments"].max()
+    pay = pay.reset_index().rename(columns={"payment_installments": "max_installments"})
+
+    df = orders.merge(agg, on="order_id", how="inner").merge(pay, on="order_id", how="left")
+
+    # ── Etats vendeur et client (livraison inter-etats) ─────────────
+    df = df.merge(customers[["customer_id", "customer_state"]], on="customer_id", how="left")
+    df = df.merge(sellers[["seller_id", "seller_state"]],
+                  left_on="main_seller", right_on="seller_id", how="left")
+
+    # ── Filtrage : on n'apprend que sur des commandes livrees ───────
+    # Une commande annulee ou en cours n'a pas de verite connue.
+    df = df[df["order_status"] == "delivered"]
+    df = df.dropna(subset=["order_delivered_customer_date"])
+
+    # ── La cible : la commande a-t-elle ete livree en retard ? ──────
+    df["is_late"] = (df["order_delivered_customer_date"]
+                     > df["order_estimated_delivery_date"]).astype(int)
+
+    # ── Les variables explicatives ──────────────────────────────────
+    df["cross_state_delivery"] = (df["customer_state"] != df["seller_state"]).astype(int)
+    df["purchase_weekday"] = df["order_purchase_timestamp"].dt.weekday
+    df["purchase_hour"] = df["order_purchase_timestamp"].dt.hour
+    df["max_installments"] = df["max_installments"].fillna(1).astype(int)
+
+    print(f"{len(df):,} commandes livrees exploitables")
+    print(f"Taux de retard mesure : {df['is_late'].mean() * 100:.2f} %")
+    return df
+
+
+def main():
+    df = load_and_build_features()
+    X = df[FEATURE_COLUMNS]
+    y = df["is_late"]
+
+    # On garde 20 % des commandes de cote : le modele ne les verra
+    # jamais pendant l'entrainement, elles servent a mesurer ses
+    # performances sur des cas nouveaux. "stratify" conserve la meme
+    # proportion de retards dans les deux groupes.
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y)
+    print(f"Entrainement sur {len(X_train):,} commandes, test sur {len(X_test):,}")
+
+    # ── Entrainement ────────────────────────────────────────────────
+    # PAS de scale_pos_weight ici, volontairement : ce reglage rendrait
+    # le modele beaucoup plus alarmiste et fausserait les probabilites.
+    # Or tout le cadrage repose sur des probabilites CALIBREES sur le
+    # taux de retard reel (~8 %), pour que les seuils metier (20 % et
+    # 10 %) gardent leur sens.
+    model = XGBClassifier(
+        n_estimators=300,
+        max_depth=6,
+        learning_rate=0.1,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        eval_metric="logloss",
+        random_state=42,
+    )
+    print("Entrainement du modele...")
+    model.fit(X_train, y_train)
+
+    # predict_proba donne la PROBABILITE de retard : c'est cette sortie
+    # que l'API expose en pourcentage, jamais un oui/non.
+    proba = model.predict_proba(X_test)[:, 1]
+    pred = (proba >= 0.20).astype(int)  # seuil metier d'action
+
+    precision = precision_score(y_test, pred, zero_division=0)
+    recall = recall_score(y_test, pred, zero_division=0)
+    auc = roc_auc_score(y_test, proba)
+
+    print(f"\nPrecision : {precision:.1%}   Rappel : {recall:.1%}   AUC : {auc:.3f}")
+    print(f"Probabilite moyenne predite : {proba.mean():.1%} "
+          f"(taux de retard reel : {y_test.mean():.1%})")
+
+    # ── Sauvegarde du modele ────────────────────────────────────────
+    # En production, cette etape passe par le registre MLflow (cf.
+    # src/training/mlflow_train.py). En local, on enregistre dans un
+    # fichier : l'API le charge au demarrage si elle le trouve.
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    model_path = os.path.join(MODEL_DIR, "model.json")
+    model.save_model(model_path)
+
+    meta = {
+        "features": FEATURE_COLUMNS,
+        "precision": round(float(precision), 4),
+        "recall": round(float(recall), 4),
+        "auc": round(float(auc), 4),
+        "seuil_action": 0.20,
+        "seuil_surveillance": 0.10,
+        "taux_retard_donnees": round(float(y.mean()), 4),
+        "n_train": int(len(X_train)),
+        "n_test": int(len(X_test)),
+        "date_entrainement": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    with open(os.path.join(MODEL_DIR, "metadata.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+
+    print(f"\nModele sauvegarde dans {model_path}")
+    print("Redemarrez l'API pour qu'elle le charge :")
+    print("   docker compose restart api")
+
+
+if __name__ == "__main__":
+    main()
