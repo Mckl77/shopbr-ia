@@ -108,6 +108,36 @@ def load_model():
     modele a chaque appel serait beaucoup trop lent.
     """
     global model, model_version
+
+    # ── Solution de repli : modele enregistre en fichier ─────────────
+    # En production, le modele vient du registre MLflow (bloc suivant).
+    # En local, le script train_local.py depose le modele entraine dans
+    # models/model.json : on le charge en priorite s'il existe, ce qui
+    # permet de faire tourner et demontrer l'API sans serveur MLflow.
+    local_path = os.path.join(os.environ.get("MODEL_DIR", "models"), "model.json")
+    if os.path.exists(local_path):
+        try:
+            import json
+            from xgboost import XGBClassifier
+
+            local_model = XGBClassifier()
+            local_model.load_model(local_path)
+            model = local_model
+
+            # Les metadonnees ecrites par train_local.py servent a
+            # tracer quelle version repond (date, performances).
+            meta_path = os.path.join(os.path.dirname(local_path), "metadata.json")
+            if os.path.exists(meta_path):
+                with open(meta_path, encoding="utf-8") as f:
+                    meta = json.load(f)
+                model_version = f"local-{meta.get('date_entrainement', 'inconnue')}"
+            else:
+                model_version = "local"
+            logger.info(f"Modele charge depuis le fichier {local_path} ({model_version})")
+            return
+        except Exception as e:
+            logger.error(f"Echec du chargement local : {e}")
+
     try:
         # "models:/nom_du_modele/Production" est une syntaxe speciale
         # de MLflow qui dit : "donne-moi la derniere version marquee
