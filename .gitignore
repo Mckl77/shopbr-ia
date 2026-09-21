@@ -8,9 +8,13 @@
 #    regenerent tout seuls, inutile de les partager.
 # 3. GROS FICHIERS : donnees et modeles n'ont pas leur place dans git
 #    (fait pour du code) - ils vivent dans S3 / MLflow.
+#
+# Attention : dans ce fichier, un commentaire doit etre sur sa propre
+# ligne. Place en fin de ligne, il serait lu comme un nom de fichier.
 
 # ── Secrets - ne JAMAIS committer ──
-.env            # le vrai fichier de config (seul .env.example, sans secrets, est versionne)
+# Le vrai fichier de config ; seul .env.example, sans secrets, est versionne
+.env
 *.pem
 *.key
 
@@ -25,10 +29,8 @@ venv/
 # ── Donnees et modeles (trop volumineux pour git) ──
 *.csv
 *.parquet
-mlruns/         # dossier local de MLflow
 *.pkl
-
-# ── Fichiers d'editeur / systeme ──
-.vscode/
-.idea/
-.DS_Store
+# Dossier local de MLflow
+mlruns/
+# Modeles entraines localement (train_local.py)
+models/
