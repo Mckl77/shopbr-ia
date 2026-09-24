@@ -99,5 +99,7 @@ Secret à configurer dans **ce** dépôt : `DEPLOY_REPO_TOKEN`
 | C4.3 | `src/api/api.py` (API REST intégrée à l'infra) |
 <!-- test de la chaine CI/CD -->
 | C4.5 | `dags/airflow_dag.py` + `src/training/mlflow_train.py` |
+Demo chaine CI/CD
 
 
+Demo
