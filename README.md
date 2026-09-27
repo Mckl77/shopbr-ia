@@ -134,3 +134,6 @@ fériés brésiliens.
 | C2.7 | `src/monitoring/`, contrôles de santé, journalisation |
 | C4.3 | `src/api/api.py` (API REST intégrée à l'infrastructure) |
 | C4.5 | `dags/airflow_dag.py` + `src/training/mlflow_train.py` |
+
+
+Demo chaine CI/CD
