@@ -135,5 +135,7 @@ fériés brésiliens.
 | C4.3 | `src/api/api.py` (API REST intégrée à l'infrastructure) |
 | C4.5 | `dags/airflow_dag.py` + `src/training/mlflow_train.py` |
 
+Demo chaine CI/CD
+
 
 Demo chaine CI/CD
